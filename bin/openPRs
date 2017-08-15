@@ -1,0 +1,134 @@
+#!/bin/bash
+
+# the parameters are to determine the repo to search for PRs
+# github.com/org/repo 
+export org=$1
+export repo=$2
+
+# everthing needs somewhere to go, this goes under PRQ/bin/$0
+# also we need a keys/ area and so on
+export PRQ=BASE_DIR_OF_THIS_SCRIPT
+export mytmp=${PRQ}/tmp/$org/$repo
+export mycnf=${PRQ}/conf/$org/$repo
+export mygist=${PRQ}/gist/$org/$repo
+
+# this is the special sauce for later
+export pr_refspec=+refs/pull/*:refs/remotes/origin/pr/*
+
+function helpme(){
+cat << ENDIT
+  ${0} : needs to know the org and repo name from github.com
+  
+  ${0} open-mpi ompi
+       will look for https://www.github.com/open-mpi/ompi
+ENDIT
+  exit
+}
+
+# function which parses out a very specific json return file
+function json(){
+  jq "${1}" $mytmp/${pr_no}.json | cut -d\" -f2
+}
+
+# this function grabs the metadata to grab a workable merged tree sha
+function procure(){
+  #working_branch=$(json .head.ref)
+  #working__label=$(json .head.label)
+  #target___label=$(json .base.label)
+  export target__branch=$(json .base.ref)
+  export pr_status_setf=$(json .statuses_url)
+  export merge_commit_s=$(json .merge_commit_sha)
+  get_merge_shah $(cut -d: -f2 <<<$target__branch)
+}
+
+# this function grabs a workable merged tree sha
+function get_merge_shah(){
+branch=$1
+state=0
+  cd ${mytmp}/
+  if [[ -d ${pr_no} ]];
+  then
+    \/bin/rm -fr ./${pr_no};
+  fi
+  git clone -q -b ${branch} --single-branch https://www.github.com/${org}/${repo} ${pr_no}
+  state=$(( $state + $? ))
+
+  cd ${pr_no}/
+  git fetch -q --tags https://www.github.com/${org}/${repo} ${pr_refspec}
+  state=$(( $state + $? ))
+
+  git checkout -q -f ${merge_commit_s}
+  state=$(( $state + $? ))
+
+  if [[ "${state}" -lt "1" ]];
+  then
+    mv ${mytmp}/${pr_no}.json ${mytmp}/${pr_no}.pre
+    echo URL:${pr_status_setf} > ${mycnf}/${pr_no}
+    echo PWD:${mytmp}/${pr_no} >> ${mycnf}/${pr_no}
+    echo GID:$(gists) >> ${mycnf}/${pr_no}
+    echo PRN:$org/$repo/$pr_no
+  else
+    echo _X_:$org/$repo/$pr_no
+  fi
+}
+
+# show or create and show a gist URL for a PR we found
+function gists(){
+if [[ ! -r $mygist/$pr_no ]]; then
+# got to make a GIST id for this PR
+cat > ${mygist}/${pr_no}.n.json << ENDOFJSON
+{
+  "description": "merged tree build PR $pr_no for $org/$repo",
+  "public": true,
+  "files": {
+    "prlog.txt": {
+      "content": "Insert witticism here."
+    }
+  }
+}
+ENDOFJSON
+  curl -s -X "POST" -H "Content-Type: application/json" \
+  -H "Authorization: token ${token}" --data @${mygist}/${pr_no}.n.json \
+  --url "https://api.github.com/gists" > $mygist/${pr_no}.json
+  jq ".url" $mygist/${pr_no}.json |cut -d\" -f2 > $mygist/$pr_no
+fi
+cat $mygist/$pr_no
+}
+
+# simple  parameter check
+if [[ "x$1" == "x" ]]; then helpme; fi
+if [[ "x$2" == "x" ]]; then helpme; fi
+
+# create dirs
+mkdir -p $mytmp $mygist $mycnf
+
+# grab the token from the keys file 
+if [[ -r  ${PRQ}/keys/${org}.key ]];
+then
+  export token=$(cat ${PRQ}/keys/${org}.key)
+else
+  echo No keyfile in ${PRQ}/keys/${org}.key
+fi
+
+# pull the list of OPEN prs from github.com for that org/repo combination
+curl -s -G -H "Authorization: token ${token}" --url "https://api.github.com/repos/${org}/${repo}/pulls?state=open" > ${mytmp}/open_prs
+
+# walk through that list to get some metadata per PR
+# and pull a tree if it's a new or updated PR
+for pr in $(jq '.[]| .url' $mytmp/open_prs | cut -d\" -f2| sort -u)
+do
+  export pr_no=$(basename $pr)
+  mkdir -p ${mytmp}/${pr_no}
+  curl -s -G -H "Authorization: token ${token}" --url "${pr}" > ${mytmp}/${pr_no}.json
+  if [[ -r ${mytmp}/${pr_no}.pre ]];
+  then
+    diff -q ${mytmp}/${pr_no}.pre ${mytmp}/${pr_no}.json > /dev/null
+    if [[ $? -gt 0 ]];
+    then
+      procure
+    fi
+  else
+    procure
+  fi
+done
+
